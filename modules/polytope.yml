@@ -1,0 +1,6 @@
+include:
+  - modules/frontend
+tools:
+  default:
+    run:
+      - tool: "frontend"

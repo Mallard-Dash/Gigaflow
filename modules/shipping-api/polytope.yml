@@ -1,0 +1,125 @@
+tools:
+  shipping-api:
+    info: "'Base' module for other modules in this file to build on."
+    params:
+      - id: cmd
+        info: The command to run
+        type: [default, str, ./bin/run]
+      - id: dev-mode
+        info: Whether to run in dev mode (with hot reload, debugging)
+        type: [default, bool, true]
+      - id: port
+        info: The port the API will run on
+        type: [default, int, 3030]
+      - id: restart-policy
+        info: Restart policy for the container.
+        type: [default, [enum, always, never, on-failure], always]
+      - id: id
+        info: The container ID to use.
+        type: [default, str, shipping-api]
+      - id: create
+        info: Whether to create the container.
+        type: [default, [enum, never, always, when-missing], when-missing]
+    run:
+      - tool: polytope/python
+        args:
+          id: pt.param id
+          image: astral/uv:python3.13-bookworm-slim
+          code: { type: repo, path: . }
+          cmd: pt.param cmd
+          restart:
+            policy: pt.param restart-policy
+          services: |-
+            #pt-js
+            params.cmd === "./bin/run"
+              ? [{ id: "shipping-api", ports: [{ protocol: "http", port: params.port, 'expose-as': params.port }] }]
+              : null;
+          env:
+            - { name: HTTP_EXPOSE_ERRORS, value: pt.param dev-mode }
+            - { name: HTTP_AUTORELOAD, value: pt.param dev-mode }
+            - { name: HTTP_PORT, value: pt.param port }
+            - { name: LOG_LEVEL, value: INFO }
+
+            - { name: POSTGRES_HOST, value: postgres }
+
+            - { name: TEMPORAL_HOST, value: temporal }
+            - { name: TEMPORAL_PORT, value: 7233 }
+            - { name: TEMPORAL_NAMESPACE, value: default }
+            - { name: TEMPORAL_TASK_QUEUE, value: main-task-queue }
+          mounts:
+            - { path: /root/.cache/, source: { type: volume, scope: project, id: shipping-api-dependency-cache } }
+            - { path: /lib/py, source: { type: repo, path: /lib/py, repo: "#pt-clj pt/module-project-ref" } }
+  shipping-api-add:
+    info: Adds one or more packages to the pyproject.toml file.
+    params:
+      - id: packages
+        info: comma/whitespace-separated list of python packages to add to pyproject.toml
+        type: str
+    run:
+      - tool: shipping-api
+        args:
+          id: shipping-api-add
+          restart-policy: never
+          cmd: '#pt-js "./bin/add-dependencies " + params.packages.replace(/[\s,]+/g, " ")'
+          create: always
+
+  shipping-api-add-couchbase-client:
+    info: Adds Couchbase client library with all interaction functions and registers add-couchbase-collection tool to polytope.yml.
+    params: []
+    await: [add-couchbase-scripts, add-couchbase-client]
+    run:
+      - tool: polytope/scaffold
+        id: add-couchbase-scripts
+        args:
+          actions:
+            - template: {type: repo, repo: "bluetext-io/bluetext", path: /templates/lib/py/couchbase-client}
+              path: /lib/py/couchbase-client
+              on-conflict: skip
+            - template: {type: repo, repo: "bluetext-io/bluetext", path: /templates/api/bin/add-couchbase-collection}
+              path: /modules/shipping-api/bin/add-couchbase-collection
+              on-conflict: skip
+      - tool: shipping-api
+        after: { step: add-couchbase-scripts }
+        id: add-couchbase-client
+        args:
+          id: api-add-couchbase-client
+          cmd: ./bin/add-couchbase-client
+          restart-policy: never
+
+  shipping-api-add-temporal-client:
+    info: Adds Temporal client library with workflow orchestration support and registers add-temporal-workflow tool to polytope.yml. 
+    params: []
+    await: [add-temporal-scripts, add-temporal-client]
+    run:
+      - tool: polytope/scaffold
+        id: add-temporal-scripts
+        args:
+          actions:
+            - template: {type: repo, repo: "bluetext-io/bluetext", path: /templates/lib/py/temporal-client}
+              path: /lib/py/temporal-client
+              on-conflict: skip
+            - template: {type: repo, repo: "bluetext-io/bluetext", path: /templates/api/bin/add-temporal-workflow}
+              path: /modules/shipping-api/bin/add-temporal-workflow
+              on-conflict: skip
+
+      - tool: shipping-api
+        after: { step: add-temporal-scripts }
+        id: add-temporal-client
+        args:
+          id: api-add-temporal-client
+          cmd: ./bin/add-temporal-client
+          restart-policy: never
+
+  shipping-api-add-temporal-workflow:
+    info: Scaffold a new Temporal workflow with activity, Pydantic models, and automatic registration.
+    params:
+      - id: name
+        info: The name of the workflow to create (e.g., 'greeting', 'data-processing')
+        type: str
+    run:
+      - tool: shipping-api
+        args:
+          id: shipping-api-add-temporal-workflow
+          restart-policy: never
+          cmd: ./bin/add-temporal-workflow {pt.param name}
+          create: always
