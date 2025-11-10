@@ -1,5 +1,5 @@
 import asyncio
-import random
+import random  # Used only in activities, NOT in workflows
 from datetime import timedelta, datetime
 from enum import Enum
 
@@ -47,6 +47,7 @@ class ShipmentState(str, Enum):
     LOCAL_DELIVERY = "LOCAL_DELIVERY"
     DELIVERED = "DELIVERED"
     CANCELED = "CANCELED"
+    CRITICAL_HALT = "CRITICAL_HALT"
 
 
 class HumanOperatorChoice(str, Enum):
@@ -110,11 +111,20 @@ class WarehouseAllocationInput(BaseModel):
     alternative_warehouses: list[str]
 
 
+class ResolutionOption(BaseModel):
+    """Enhanced resolution option with cost and time impact."""
+    text: str
+    cost: str = "$0"  # e.g. "$0", "$200", "$500"
+    time_impact: str = "No delay"  # e.g. "No delay", "+2 days", "+24 hours"
+
+
 class ErrorDetails(BaseModel):
     reason: str
     details: str
     eta_impact: timedelta | None = None
-    resolution_options: list[str] = []
+    resolution_options: list[str] = []  # Legacy support
+    enhanced_options: list[ResolutionOption] = []  # Enhanced options with cost/time
+    backup_warehouse_capacity_hours: int | None = None  # Random 5-48 hours
 
 
 class DeliveryUpdate(BaseModel):
@@ -126,9 +136,22 @@ class DeliveryUpdate(BaseModel):
     new_eta: str | None = None
 
 
+class WorkflowSummary(BaseModel):
+    """Comprehensive workflow summary with cost and time analysis."""
+    total_cost: float = 0.0  # Total cost in dollars
+    time_saved_hours: float = 0.0  # Negative if delayed
+    production_line_stopped: bool = False
+    production_stop_duration_hours: float = 0.0
+    production_loss_cost: float = 0.0  # Cost due to production stoppage
+    decisions_made: list[str] = []  # List of HITL decisions
+    avoided_production_stop: bool = False  # True if expensive option avoided stoppage
+    final_status: str = "COMPLETED"
+
+
 class ShipmentResponse(BaseModel):
     shipment_id: str
     state: ShipmentState
+    summary: WorkflowSummary | None = None
 
 
 #### Activities ####
@@ -244,6 +267,11 @@ async def check_transport_status(
                 "Do nothing and wait out bad weather (pause workflow)",
                 "Reroute shipment from unaffected supplier (high cost)",
             ],
+            enhanced_options=[
+                ResolutionOption(text="Notice customers and offer refunds", cost="$0", time_impact=f"+{delay_days} days delay"),
+                ResolutionOption(text="Do nothing and wait out bad weather (pause workflow)", cost="$0", time_impact=f"+{delay_days} days delay"),
+                ResolutionOption(text="Reroute shipment from unaffected supplier (high cost)", cost="$500", time_impact="+1 day"),
+            ],
         )
 
     logger.info("✅ Transport status OK - departure on schedule")
@@ -269,7 +297,13 @@ async def check_customs_status(
                 "Provide additional documentation",
                 "Pay expedited processing fee",
                 "Accept delay",
-                "Return shipment",
+                "Reroute from another supplier (more expensive, but faster)",
+            ],
+            enhanced_options=[
+                ResolutionOption(text="Provide additional documentation", cost="$0", time_impact="+1 day"),
+                ResolutionOption(text="Pay expedited processing fee", cost="$200", time_impact="+4 hours"),
+                ResolutionOption(text="Accept delay", cost="$0", time_impact=f"+{delay_days} days"),
+                ResolutionOption(text="Reroute from another supplier (more expensive, but faster)", cost="$800", time_impact="+12 hours"),
             ],
         )
 
@@ -298,48 +332,25 @@ async def check_delivery_status(
                 "Return to depot for pickup",
                 "Cancel delivery",
             ],
+            enhanced_options=[
+                ResolutionOption(text="Schedule new delivery time", cost="$0", time_impact=f"+{delay_hours}h"),
+                ResolutionOption(text="Leave at safe location", cost="$0", time_impact="Immediate"),
+                ResolutionOption(text="Return to depot for pickup", cost="$25", time_impact="Customer pickup"),
+                ResolutionOption(text="Cancel delivery", cost="$0", time_impact="Immediate"),
+            ],
         )
 
     logger.info("✅ Delivery confirmed - recipient available")
     return True, None
 
 
-@activity.defn
-async def monitor_shipment_status(
-    shipment_id: str, state: ShipmentState
-) -> tuple[bool, ErrorDetails | None]:
-    """Monitor for random delays - 20% chance after main issue resolved."""
-    logger.info(f"🔍 Monitoring shipment {shipment_id} in state {state}")
-    await asyncio.sleep(0.5)
-
-    # 15% chance of random delay
-    if random.random() < 0.15:
-        delay_reasons = list(DelayReason)
-        delay_reason = random.choice(delay_reasons)
-        delay_hours = random.randint(1, 48)  # 1 hour to 2 days
-
-        delay_details_map = {
-            DelayReason.LOGISTICS_DELAY: f"Unexpected {delay_hours}h delay at logistics hub",
-            DelayReason.WEATHER_IMPACT: f"Weather conditions causing {delay_hours}h delay",
-            DelayReason.TRAFFIC_CONGESTION: f"Heavy traffic causing {delay_hours}h delay",
-            DelayReason.RESOURCE_SHORTAGE: f"Resource constraints causing {delay_hours}h delay",
-            DelayReason.TECHNICAL_ISSUES: f"Technical issues causing {delay_hours}h delay",
-        }
-
-        logger.warning(f"⚠️ Random delay detected: {delay_details_map[delay_reason]}")
-        return False, ErrorDetails(
-            reason=delay_reason.value,
-            details=delay_details_map[delay_reason],
-            eta_impact=timedelta(hours=delay_hours),
-            resolution_options=[
-                "Do nothing (small delay)",
-                "Inform customers",
-                "Contact and rearrange logistics-hub timeslots",
-            ],
-        )
-
-    logger.info("✅ No delays detected")
-    return True, None
+# DISABLED: Random events feature removed per user request
+# @activity.defn
+# async def monitor_shipment_status(
+#     shipment_id: str, state: ShipmentState
+# ) -> tuple[bool, ErrorDetails | None]:
+#     """Monitor for random delays - DISABLED."""
+#     return True, None
 
 
 @activity.defn
@@ -402,6 +413,13 @@ class ShipmentWorkflow:
         self._transport_resolution = asyncio.Event()
         self._customs_resolution = asyncio.Event()
         self._delivery_resolution = asyncio.Event()
+        
+        # Tracking state for summary
+        self._summary = WorkflowSummary()
+        self._original_eta_hours: float = 168.0  # 7 days baseline
+        self._workflow_paused = asyncio.Event()
+        self._pause_requested = False
+        self._workflow_start_time: datetime | None = None
 
     @workflow.run
     async def run(self, input: ShipmentInput) -> ShipmentResponse:
@@ -491,6 +509,12 @@ class ShipmentWorkflow:
                                 "Retry payment",
                                 "Resume when system is ready",
                                 "Cancel order"
+                            ],
+                            enhanced_options=[
+                                ResolutionOption(text="Send to tech support", cost="$50", time_impact="+2-4 hours"),
+                                ResolutionOption(text="Retry payment", cost="$0", time_impact="+5 min"),
+                                ResolutionOption(text="Resume when system is ready", cost="$0", time_impact="Pause workflow"),
+                                ResolutionOption(text="Cancel order", cost="$0", time_impact="Immediate")
                             ]
                         )
                         await workflow.execute_activity(
@@ -539,6 +563,7 @@ class ShipmentWorkflow:
         )
 
         if not allocation.stock_available:
+            backup_capacity = int(workflow.random().random() * 43) + 5  # Random 5-48 hours
             self._current_error = ErrorDetails(
                 reason="INSUFFICIENT_STOCK",
                 details=f"Insufficient stock in primary warehouse",
@@ -546,7 +571,13 @@ class ShipmentWorkflow:
                     "Allocate from different warehouse",
                     "Cancel order and reorder from another supplier",
                     "Wait for stock to be replenished"
-                ]
+                ],
+                enhanced_options=[
+                    ResolutionOption(text="Allocate from different warehouse", cost="$150", time_impact="+1 day"),
+                    ResolutionOption(text="Cancel order and reorder from another supplier", cost="$0", time_impact="Immediate"),
+                    ResolutionOption(text="Wait for stock to be replenished", cost="$0", time_impact="+3-5 days")
+                ],
+                backup_warehouse_capacity_hours=backup_capacity
             )
             await workflow.execute_activity(
                 notify_human_operator,
@@ -554,6 +585,7 @@ class ShipmentWorkflow:
                     input.shipment_id,
                     f"⚠️ Insufficient stock in primary warehouse\n"
                     f"📦 Alternative warehouses: {', '.join(allocation.alternative_warehouses)}\n"
+                    f"⏱️  Production line capacity remaining: {backup_capacity} hours\n"
                     "📋 Available options:\n"
                     "  1. Allocate from different warehouse\n"
                     "  2. Cancel order and reorder from another supplier\n"
@@ -562,7 +594,37 @@ class ShipmentWorkflow:
                 ],
                 start_to_close_timeout=timedelta(seconds=10),
             )
-            await self._warehouse_resolution.wait()
+            
+            # Race between human resolution and 15-second HARD DEADLINE
+            HITL_DEADLINE_SECONDS = 15
+            try:
+                await asyncio.wait_for(
+                    self._warehouse_resolution.wait(),
+                    timeout=HITL_DEADLINE_SECONDS
+                )
+            except asyncio.TimeoutError:
+                # CRITICAL FAILURE - LINE HALTED!
+                self._summary.production_line_stopped = True
+                self._summary.production_stop_duration_hours = float(backup_capacity)
+                self._summary.production_loss_cost = backup_capacity * 60 * 100  # $100/minute
+                
+                await workflow.execute_activity(
+                    notify_human_operator,
+                    args=[
+                        input.shipment_id,
+                        f"🚨 CRITICAL FAILURE! **LINE HALTED.** Deadline missed. Workflow terminated.\n"
+                        f"⏱️  15-second deadline expired - no human response received\n"
+                        f"💰 Production loss: ${self._summary.production_loss_cost:,.2f}\n"
+                        f"🏭 Factory shutdown triggered!",
+                        True,
+                    ],
+                    start_to_close_timeout=timedelta(seconds=10),
+                )
+                self._state = ShipmentState.CRITICAL_HALT
+                self._summary.final_status = "CRITICAL_HALT"
+                logger.error(f"🚨 CRITICAL FAILURE! LINE HALTED. Deadline missed. Workflow terminated.")
+                return ShipmentResponse(shipment_id=input.shipment_id, state=self._state, summary=self._summary)
+            
             if self._state == ShipmentState.CANCELED:
                 logger.info(f"🚫 Workflow cancelled")
                 return ShipmentResponse(shipment_id=input.shipment_id, state=self._state)
@@ -602,13 +664,35 @@ class ShipmentWorkflow:
                     input.shipment_id,
                     f"⚠️ Transport issue: {error_details.details}\n"
                     f"⏰ ETA Impact: +{error_details.eta_impact.days} days\n"
+                    f"⏱️  15-second deadline for HITL response\n"
                     f"📋 Available options:\n"
                     + "\n".join(f"  {i+1}. {opt}" for i, opt in enumerate(error_details.resolution_options)),
                     True,
                 ],
                 start_to_close_timeout=timedelta(seconds=10),
             )
-            await self._transport_resolution.wait()
+            
+            # Race between human resolution and 15-second HARD DEADLINE
+            try:
+                await asyncio.wait_for(
+                    self._transport_resolution.wait(),
+                    timeout=15
+                )
+            except asyncio.TimeoutError:
+                # CRITICAL FAILURE - LINE HALTED!
+                await workflow.execute_activity(
+                    notify_human_operator,
+                    args=[
+                        input.shipment_id,
+                        f"🚨 CRITICAL FAILURE! **LINE HALTED.** Deadline missed. Workflow terminated.",
+                        True,
+                    ],
+                    start_to_close_timeout=timedelta(seconds=10),
+                )
+                self._state = ShipmentState.CRITICAL_HALT
+                self._summary.final_status = "CRITICAL_HALT"
+                logger.error(f"🚨 CRITICAL FAILURE! LINE HALTED. Deadline missed. Workflow terminated.")
+                return ShipmentResponse(shipment_id=input.shipment_id, state=self._state, summary=self._summary)
             if self._state == ShipmentState.CANCELED:
                 logger.info(f"🚫 Workflow cancelled")
                 return ShipmentResponse(shipment_id=input.shipment_id, state=self._state)
@@ -648,13 +732,35 @@ class ShipmentWorkflow:
                     input.shipment_id,
                     f"⚠️ Customs issue: {error_details.details}\n"
                     f"⏰ ETA Impact: +{error_details.eta_impact.days} days\n"
+                    f"⏱️  15-second deadline for HITL response\n"
                     f"📋 Available options:\n"
                     + "\n".join(f"  {i+1}. {opt}" for i, opt in enumerate(error_details.resolution_options)),
                     True,
                 ],
                 start_to_close_timeout=timedelta(seconds=10),
             )
-            await self._customs_resolution.wait()
+            
+            # Race between human resolution and 15-second HARD DEADLINE
+            try:
+                await asyncio.wait_for(
+                    self._customs_resolution.wait(),
+                    timeout=15
+                )
+            except asyncio.TimeoutError:
+                # CRITICAL FAILURE - LINE HALTED!
+                await workflow.execute_activity(
+                    notify_human_operator,
+                    args=[
+                        input.shipment_id,
+                        f"🚨 CRITICAL FAILURE! **LINE HALTED.** Deadline missed. Workflow terminated.",
+                        True,
+                    ],
+                    start_to_close_timeout=timedelta(seconds=10),
+                )
+                self._state = ShipmentState.CRITICAL_HALT
+                self._summary.final_status = "CRITICAL_HALT"
+                logger.error(f"🚨 CRITICAL FAILURE! LINE HALTED. Deadline missed. Workflow terminated.")
+                return ShipmentResponse(shipment_id=input.shipment_id, state=self._state, summary=self._summary)
             if self._state == ShipmentState.CANCELED:
                 logger.info(f"🚫 Workflow cancelled")
                 return ShipmentResponse(shipment_id=input.shipment_id, state=self._state)
@@ -731,57 +837,9 @@ class ShipmentWorkflow:
         return ShipmentResponse(shipment_id=input.shipment_id, state=self._state)
 
     async def _check_for_random_delays(self, shipment_id: str) -> None:
-        """Check for random delays (50% chance) that can occur after any stage."""
-        if self._state in [ShipmentState.DELIVERED, ShipmentState.CANCELED]:
-            return
-
-        ok, error_details = await workflow.execute_activity(
-            monitor_shipment_status,
-            args=[shipment_id, self._state],
-            start_to_close_timeout=timedelta(seconds=10),
-        )
-
-        if not ok and error_details:
-            self._delivery_update = await workflow.execute_activity(
-                update_delivery_estimate,
-                args=[shipment_id, self._state, error_details],
-                start_to_close_timeout=timedelta(seconds=10),
-            )
-
-            delay_hours = error_details.eta_impact.total_seconds() / 3600 if error_details.eta_impact else 0
-            
-            if delay_hours > 1:
-                # Significant delay - require human decision
-                self._current_error = error_details
-                await workflow.execute_activity(
-                    notify_human_operator,
-                    args=[
-                        shipment_id,
-                        f"⚠️ Shipment delayed: {error_details.details}\n"
-                        f"⏰ ETA Impact: +{delay_hours:.1f} hours\n"
-                        f"📋 Available options:\n"
-                        + "\n".join(f"  {i+1}. {opt}" for i, opt in enumerate(error_details.resolution_options)),
-                        True,
-                    ],
-                    start_to_close_timeout=timedelta(seconds=10),
-                )
-                # Create a delay resolution event and wait
-                delay_resolution = asyncio.Event()
-                self._delay_resolution = delay_resolution
-                await delay_resolution.wait()
-                self._current_error = None
-            else:
-                # Small delay - auto-resolve
-                delay_minutes = error_details.eta_impact.total_seconds() / 60 if error_details.eta_impact else 0
-                await workflow.execute_activity(
-                    notify_human_operator,
-                    args=[
-                        shipment_id,
-                        f"ℹ️ ETA changed by {delay_minutes:.0f} minutes due to {error_details.reason}. Issue auto-resolved.",
-                        False,
-                    ],
-                    start_to_close_timeout=timedelta(seconds=10),
-                )
+        """DISABLED: Random events feature removed per user request."""
+        # No-op: Random delays have been disabled
+        return
 
     @workflow.signal
     async def allocate_warehouse(self) -> None:
@@ -1030,22 +1088,27 @@ class ShipmentWorkflow:
         workflow_id = workflow.info().workflow_id
 
         if choice == HumanOperatorChoice.ALLOCATE_DIFFERENT:
+            # Track decision: $150 cost, +1 day delay
+            self._track_decision("Allocate from different warehouse", cost=150.0, time_impact_hours=-24.0)
             await workflow.execute_activity(
                 notify_human_operator,
-                args=[workflow_id, "✅ Allocating from alternative warehouse.", False],
+                args=[workflow_id, "✅ Allocating from alternative warehouse (+$150, +1 day).", False],
                 start_to_close_timeout=timedelta(seconds=10),
             )
             self._current_error = None
             self._warehouse_resolution.set()
         elif choice == HumanOperatorChoice.WAIT_FOR_STOCK:
+            # Track decision: $0 cost, +3-5 days delay (use average 4 days)
+            self._track_decision("Wait for stock replenishment", cost=0.0, time_impact_hours=-96.0)
             await workflow.execute_activity(
                 notify_human_operator,
-                args=[workflow_id, "⏳ Waiting for stock replenishment.", False],
+                args=[workflow_id, "⏳ Waiting for stock replenishment (+3-5 days).", False],
                 start_to_close_timeout=timedelta(seconds=10),
             )
             self._current_error = None
             self._warehouse_resolution.set()
         elif choice == HumanOperatorChoice.CANCEL_ORDER:
+            self._track_decision("Cancel order", cost=0.0, time_impact_hours=0.0)
             self._state = ShipmentState.CANCELED
             self._current_error = None
             self._warehouse_resolution.set()
@@ -1056,22 +1119,29 @@ class ShipmentWorkflow:
         workflow_id = workflow.info().workflow_id
 
         if choice == HumanOperatorChoice.WAIT_OUT_WEATHER:
+            # Track: $0 cost, delay varies (2-5 days)
+            self._track_decision("Wait out bad weather", cost=0.0, time_impact_hours=-72.0)
             await workflow.execute_activity(
                 notify_human_operator,
-                args=[workflow_id, "⏳ Pausing - waiting for weather to clear.", False],
+                args=[workflow_id, "⏳ Pausing - waiting for weather to clear (+2-5 days).", False],
                 start_to_close_timeout=timedelta(seconds=10),
             )
             self._current_error = None
             self._transport_resolution.set()
         elif choice == HumanOperatorChoice.REROUTE_SHIPMENT:
+            # Track: $500 cost, +1 day but avoids longer delay
+            self._track_decision("Reroute via alternative supplier", cost=500.0, time_impact_hours=-24.0)
+            self._summary.avoided_production_stop = True
             await workflow.execute_activity(
                 notify_human_operator,
-                args=[workflow_id, "🔄 Rerouting via alternative supplier (+$500).", False],
+                args=[workflow_id, "🔄 Rerouting via alternative supplier (+$500, +1 day).", False],
                 start_to_close_timeout=timedelta(seconds=10),
             )
             self._current_error = None
             self._transport_resolution.set()
         elif choice == HumanOperatorChoice.NOTICE_CUSTOMERS_REFUND:
+            # Track: $0 cost, accepts delay
+            self._track_decision("Notice customers with refund option", cost=0.0, time_impact_hours=-72.0)
             await workflow.execute_activity(
                 notify_human_operator,
                 args=[workflow_id, "📧 Notifying customers with refund option.", False],
@@ -1080,6 +1150,7 @@ class ShipmentWorkflow:
             self._current_error = None
             self._transport_resolution.set()
         elif choice == HumanOperatorChoice.CANCEL_ORDER:
+            self._track_decision("Cancel order", cost=0.0, time_impact_hours=0.0)
             self._state = ShipmentState.CANCELED
             self._transport_resolution.set()
             self._exit.set()
@@ -1089,44 +1160,64 @@ class ShipmentWorkflow:
         workflow_id = workflow.info().workflow_id
 
         if choice == HumanOperatorChoice.PROVIDE_DOCUMENTATION:
+            self._track_decision("Provide additional documentation", cost=0.0, time_impact_hours=-24.0)
             await workflow.execute_activity(
                 notify_human_operator,
-                args=[workflow_id, "📄 Documentation submitted to customs.", False],
+                args=[workflow_id, "📄 Documentation submitted to customs (+1 day).", False],
                 start_to_close_timeout=timedelta(seconds=10),
             )
             self._current_error = None
             self._customs_resolution.set()
         elif choice == HumanOperatorChoice.PAY_EXPEDITED_FEE:
+            self._track_decision("Pay expedited processing fee", cost=200.0, time_impact_hours=-4.0)
             await workflow.execute_activity(
                 notify_human_operator,
-                args=[workflow_id, "💰 Expedited fee paid (+$200).", False],
+                args=[workflow_id, "💰 Expedited fee paid (+$200, +4 hours).", False],
                 start_to_close_timeout=timedelta(seconds=10),
             )
             self._current_error = None
             self._customs_resolution.set()
         elif choice == HumanOperatorChoice.ACCEPT_DELAY:
+            self._track_decision("Accept customs delay", cost=0.0, time_impact_hours=-72.0)
             await workflow.execute_activity(
                 notify_human_operator,
-                args=[workflow_id, "⏳ Delay accepted. Monitoring progress.", False],
+                args=[workflow_id, "⏳ Delay accepted. Monitoring progress (+2-4 days).", False],
                 start_to_close_timeout=timedelta(seconds=10),
             )
             self._current_error = None
             self._customs_resolution.set()
-        elif choice == HumanOperatorChoice.RETURN_SHIPMENT:
-            self._state = ShipmentState.CANCELED
+        elif choice == HumanOperatorChoice.REROUTE_SHIPMENT:
+            self._track_decision("Reroute from alternative supplier", cost=800.0, time_impact_hours=-12.0)
+            self._summary.avoided_production_stop = True
+            await workflow.execute_activity(
+                notify_human_operator,
+                args=[workflow_id, "🔄 Rerouting from alternative supplier (+$800, +12 hours).", False],
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+            self._current_error = None
             self._customs_resolution.set()
-            self._exit.set()
 
     @workflow.signal
     async def handle_delivery_resolution(self, choice: HumanOperatorChoice) -> None:
         workflow_id = workflow.info().workflow_id
 
         if choice == HumanOperatorChoice.CANCEL_ORDER:
+            self._track_decision("Cancel order", cost=0.0, time_impact_hours=0.0)
             self._state = ShipmentState.CANCELED
             self._current_error = None
             self._delivery_resolution.set()
             self._exit.set()
+        elif choice == HumanOperatorChoice.RETURN_TO_DEPOT:
+            self._track_decision("Return to depot for pickup", cost=25.0, time_impact_hours=0.0)
+            await workflow.execute_activity(
+                notify_human_operator,
+                args=[workflow_id, "✅ Delivery resolved: Return to depot for pickup (+$25)", False],
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+            self._current_error = None
+            self._delivery_resolution.set()
         else:
+            self._track_decision(f"Delivery resolved: {choice.value}", cost=0.0, time_impact_hours=-24.0)
             await workflow.execute_activity(
                 notify_human_operator,
                 args=[workflow_id, f"✅ Delivery resolved: {choice.value}", False],
@@ -1140,13 +1231,15 @@ class ShipmentWorkflow:
         workflow_id = workflow.info().workflow_id
 
         if choice == HumanOperatorChoice.CANCEL_ORDER:
+            self._track_decision("Cancel order", cost=0.0, time_impact_hours=0.0)
             self._state = ShipmentState.CANCELED
             self._current_error = None
             self._exit.set()
         elif choice == HumanOperatorChoice.SEND_TO_TECH_SUPPORT:
+            self._track_decision("Send to tech support", cost=50.0, time_impact_hours=-3.0)
             await workflow.execute_activity(
                 notify_human_operator,
-                args=[workflow_id, "🔧 Escalated to tech support. Payment will be processed manually.", False],
+                args=[workflow_id, "🔧 Escalated to tech support (+$50, +2-4 hours).", False],
                 start_to_close_timeout=timedelta(seconds=10),
             )
             self._payment_status = PaymentStatus.SUCCESS
@@ -1154,11 +1247,13 @@ class ShipmentWorkflow:
             self._current_error = None
             self._payment_resolution.set()
         elif choice == HumanOperatorChoice.RETRY_PAYMENT:
+            self._track_decision("Retry payment", cost=0.0, time_impact_hours=-0.08)
             self._payment_retries = 0
             self._payment_status = PaymentStatus.PENDING
             self._current_error = None
             self._payment_resolution.set()
         elif choice == HumanOperatorChoice.RESUME_WHEN_READY:
+            self._track_decision("Resume when system is ready", cost=0.0, time_impact_hours=0.0)
             self._payment_status = PaymentStatus.SUCCESS
             self._state = ShipmentState.PAYMENT_RECEIVED
             self._current_error = None
@@ -1211,3 +1306,62 @@ class ShipmentWorkflow:
     def get_current_error(self) -> ErrorDetails | None:
         """Get current error requiring human intervention."""
         return self._current_error
+    
+    @workflow.query
+    def get_summary(self) -> WorkflowSummary:
+        """Get workflow summary with cost and time analysis."""
+        return self._summary
+    
+    @workflow.query
+    def is_paused(self) -> bool:
+        """Check if workflow is currently paused."""
+        return self._pause_requested
+    
+    @workflow.signal
+    async def pause_workflow(self) -> None:
+        """Pause the workflow execution."""
+        if not self._pause_requested:
+            self._pause_requested = True
+            self._workflow_paused.clear()
+            logger.info("⏸️  Workflow paused by user")
+    
+    @workflow.signal
+    async def resume_workflow(self) -> None:
+        """Resume the workflow execution."""
+        if self._pause_requested:
+            self._pause_requested = False
+            self._workflow_paused.set()
+            logger.info("▶️  Workflow resumed by user")
+    
+    def _track_decision(self, decision: str, cost: float = 0.0, time_impact_hours: float = 0.0) -> None:
+        """Track a human decision with its cost and time impact."""
+        self._summary.decisions_made.append(decision)
+        self._summary.total_cost += cost
+        self._summary.time_saved_hours += time_impact_hours
+    
+    def _parse_cost(self, cost_str: str) -> float:
+        """Parse cost string like '$500' to float."""
+        return float(cost_str.replace('$', '').replace(',', ''))
+    
+    def _parse_time_impact(self, time_str: str) -> float:
+        """Parse time impact string to hours. Negative means delay."""
+        if "No delay" in time_str or "Immediate" in time_str:
+            return 0.0
+        
+        # Extract number
+        import re
+        match = re.search(r'[+-]?\d+', time_str)
+        if not match:
+            return 0.0
+        
+        value = float(match.group())
+        
+        # Check if it's a delay (positive) or speedup (negative)
+        if "day" in time_str.lower():
+            return -value * 24  # Days to hours (negative = delay)
+        elif "hour" in time_str or "h" in time_str:
+            return -value  # Hours (negative = delay)
+        elif "min" in time_str.lower():
+            return -value / 60  # Minutes to hours
+        
+        return 0.0

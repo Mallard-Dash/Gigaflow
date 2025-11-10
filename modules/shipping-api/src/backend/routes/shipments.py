@@ -83,10 +83,24 @@ async def get_shipment_status(shipment_id: str):
         except ApplicationError:
             current_error = None
         
+        # Get summary if available
+        try:
+            summary = await handle.query(ShipmentWorkflow.get_summary)
+        except ApplicationError:
+            summary = None
+        
+        # Get pause status if available
+        try:
+            is_paused = await handle.query(ShipmentWorkflow.is_paused)
+        except ApplicationError:
+            is_paused = False
+        
         return {
             "status": status,
             "delivery_update": delivery_update.dict() if delivery_update else None,
-            "current_error": current_error.dict() if current_error else None
+            "current_error": current_error.dict() if current_error else None,
+            "summary": summary.dict() if summary else None,
+            "is_paused": is_paused
         }
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Shipment not found: {str(e)}")
@@ -166,6 +180,30 @@ async def mark_delivered(shipment_id: str):
 class HandleResolutionRequest(BaseModel):
     choice: str
 
+@router.post("/shipments/{shipment_id}/pause")
+async def pause_workflow(shipment_id: str):
+    """Pause the workflow execution."""
+    client = await get_temporal_client()
+    
+    try:
+        handle = client.get_workflow_handle(shipment_id)
+        await handle.signal(ShipmentWorkflow.pause_workflow)
+        return {"status": "paused"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error pausing workflow: {str(e)}")
+
+@router.post("/shipments/{shipment_id}/resume")
+async def resume_workflow(shipment_id: str):
+    """Resume the workflow execution."""
+    client = await get_temporal_client()
+    
+    try:
+        handle = client.get_workflow_handle(shipment_id)
+        await handle.signal(ShipmentWorkflow.resume_workflow)
+        return {"status": "resumed"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error resuming workflow: {str(e)}")
+
 @router.post("/shipments/{shipment_id}/handle-resolution")
 async def handle_resolution(shipment_id: str, request: HandleResolutionRequest):
     """Handle human operator resolution choices."""
@@ -180,15 +218,20 @@ async def handle_resolution(shipment_id: str, request: HandleResolutionRequest):
     try:
         handle = client.get_workflow_handle(shipment_id)
         status = await handle.query(ShipmentWorkflow.get_status)
+        current_error = await handle.query(ShipmentWorkflow.get_current_error)
         
         # Check if this is a delay-specific resolution (can happen in any state)
         if choice in [HumanOperatorChoice.DO_NOTHING, HumanOperatorChoice.INFORM_CUSTOMERS, HumanOperatorChoice.REARRANGE_LOGISTICS]:
             await handle.signal(ShipmentWorkflow.handle_delay_resolution, choice)
+        # Check if this is a payment-specific resolution based on choice type
+        elif choice in [HumanOperatorChoice.SEND_TO_TECH_SUPPORT, HumanOperatorChoice.RETRY_PAYMENT, 
+                       HumanOperatorChoice.RESUME_WHEN_READY] or \
+             (current_error and current_error.reason in ["NETWORK_ERROR", "RECEIVER_ERROR", "SENDER_ERROR", 
+                                                          "INSUFFICIENT_FUNDS", "BANK_SERVER_DOWN", "TRANSACTION_ERROR"]):
+            await handle.signal(ShipmentWorkflow.handle_payment_resolution, choice)
         # Route to appropriate resolution handler based on current state
         elif status == ShipmentState.ORDER_RECEIVED:
             await handle.signal(ShipmentWorkflow.handle_order_resolution, choice)
-        elif status == ShipmentState.PAYMENT_RECEIVED:
-            await handle.signal(ShipmentWorkflow.handle_payment_resolution, choice)
         elif status == ShipmentState.WAREHOUSE_ALLOCATION or status == ShipmentState.PACKAGED:
             await handle.signal(ShipmentWorkflow.handle_warehouse_resolution, choice)
         elif status == ShipmentState.TRANSPORT_STARTED:
