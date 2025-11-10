@@ -1,8 +1,9 @@
 from uuid import uuid4
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Body
 from temporalio.client import Client
 from temporalio.exceptions import ApplicationError
 from temporalio.contrib.pydantic import pydantic_data_converter
+from pydantic import BaseModel
 
 from ..workflows.shipment import (
     ShipmentWorkflow,
@@ -13,6 +14,9 @@ from ..workflows.shipment import (
 
 router = APIRouter()
 
+class CreateShipmentRequest(BaseModel):
+    scenario_id: str | None = None
+
 async def get_temporal_client():
     return await Client.connect(
         "temporal:7233",
@@ -20,8 +24,9 @@ async def get_temporal_client():
     )
 
 @router.post("/shipments")
-async def create_shipment(scenario_id: str | None = None):
+async def create_shipment(request: CreateShipmentRequest):
     """Create a new shipment workflow."""
+    scenario_id = request.scenario_id
     client = await get_temporal_client()
     
     # Generate unique workflow ID
@@ -72,9 +77,16 @@ async def get_shipment_status(shipment_id: str):
         except ApplicationError:
             delivery_update = None
         
+        # Get current error if available
+        try:
+            current_error = await handle.query(ShipmentWorkflow.get_current_error)
+        except ApplicationError:
+            current_error = None
+        
         return {
             "status": status,
-            "delivery_update": delivery_update.dict() if delivery_update else None
+            "delivery_update": delivery_update.dict() if delivery_update else None,
+            "current_error": current_error.dict() if current_error else None
         }
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Shipment not found: {str(e)}")
@@ -139,36 +151,55 @@ async def start_local_delivery(shipment_id: str):
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Shipment not found: {str(e)}")
 
+@router.post("/shipments/{shipment_id}/mark-delivered")
+async def mark_delivered(shipment_id: str):
+    """Signal workflow to mark shipment as delivered."""
+    client = await get_temporal_client()
+    
+    try:
+        handle = client.get_workflow_handle(shipment_id)
+        await handle.signal(ShipmentWorkflow.mark_delivered)
+        return {"status": "delivered"}
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Shipment not found: {str(e)}")
+
+class HandleResolutionRequest(BaseModel):
+    choice: str
+
 @router.post("/shipments/{shipment_id}/handle-resolution")
-async def handle_resolution(shipment_id: str, choice: HumanOperatorChoice):
+async def handle_resolution(shipment_id: str, request: HandleResolutionRequest):
     """Handle human operator resolution choices."""
+    # Convert string choice to enum
+    try:
+        choice = HumanOperatorChoice[request.choice]
+    except KeyError:
+        raise HTTPException(status_code=400, detail=f"Invalid choice: {request.choice}")
+    
     client = await get_temporal_client()
     
     try:
         handle = client.get_workflow_handle(shipment_id)
         status = await handle.query(ShipmentWorkflow.get_status)
         
-        # Route to appropriate resolution handler based on current state and choice
-        if status == ShipmentState.ORDER_RECEIVED:
+        # Check if this is a delay-specific resolution (can happen in any state)
+        if choice in [HumanOperatorChoice.DO_NOTHING, HumanOperatorChoice.INFORM_CUSTOMERS, HumanOperatorChoice.REARRANGE_LOGISTICS]:
+            await handle.signal(ShipmentWorkflow.handle_delay_resolution, choice)
+        # Route to appropriate resolution handler based on current state
+        elif status == ShipmentState.ORDER_RECEIVED:
             await handle.signal(ShipmentWorkflow.handle_order_resolution, choice)
+        elif status == ShipmentState.PAYMENT_RECEIVED:
+            await handle.signal(ShipmentWorkflow.handle_payment_resolution, choice)
+        elif status == ShipmentState.WAREHOUSE_ALLOCATION or status == ShipmentState.PACKAGED:
+            await handle.signal(ShipmentWorkflow.handle_warehouse_resolution, choice)
         elif status == ShipmentState.TRANSPORT_STARTED:
-            # Auto-resolve transport issues to keep workflow moving
-            if choice == HumanOperatorChoice.WAIT_FOR_RESOLUTION:
-                choice = HumanOperatorChoice.REROUTE_SHIPMENT
             await handle.signal(ShipmentWorkflow.handle_transport_resolution, choice)
         elif status == ShipmentState.CUSTOMS_CLEARANCE:
-            # Auto-resolve customs issues to keep workflow moving
-            if choice == HumanOperatorChoice.ACCEPT_DELAY:
-                choice = HumanOperatorChoice.PROVIDE_DOCUMENTATION
             await handle.signal(ShipmentWorkflow.handle_customs_resolution, choice)
-        elif choice in [HumanOperatorChoice.NOTIFY_ALL_PARTIES, HumanOperatorChoice.NO_ACTION_NEEDED]:
-            await handle.signal(ShipmentWorkflow.handle_delay_resolution, choice)
+        elif status == ShipmentState.LOCAL_DELIVERY:
+            await handle.signal(ShipmentWorkflow.handle_delivery_resolution, choice)
         else:
-            # Auto-resolve payment issues to keep workflow moving
-            if choice == HumanOperatorChoice.RESUME_WHEN_READY:
-                choice = HumanOperatorChoice.SEND_TO_TECH_SUPPORT
-            await handle.signal(ShipmentWorkflow.handle_payment_resolution, choice)
+            raise HTTPException(status_code=400, detail=f"Cannot handle resolution in state {status}")
             
         return {"status": "resolution_handled"}
     except Exception as e:
-        raise HTTPException(status_code=404, detail=f"Shipment not found: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error handling resolution: {str(e)}")

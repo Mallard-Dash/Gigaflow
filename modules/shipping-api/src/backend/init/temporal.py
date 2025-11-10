@@ -15,7 +15,9 @@ from ..workflows.shipment import (
     validate_order,
     check_transport_status,
     check_customs_status,
-    update_delivery_estimate
+    check_delivery_status,
+    update_delivery_estimate,
+    monitor_shipment_status
 )
 from ..utils.log import get_logger
 
@@ -38,7 +40,9 @@ async def init_temporal(app: FastAPI) -> None:
         validate_order,
         check_transport_status,
         check_customs_status,
-        update_delivery_estimate
+        check_delivery_status,
+        update_delivery_estimate,
+        monitor_shipment_status
     ]
 
     app.state.temporal_client = TemporalClient(

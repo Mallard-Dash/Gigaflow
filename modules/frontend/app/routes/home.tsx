@@ -114,7 +114,10 @@ function ChooseMysteryBox({ setOrder }: { setOrder: (order: any) => void }) {
   const handleOrder = async (box: any) => {
     try {
       // Create shipment with scenario ID
-      const response = await fetch('http://localhost:3030/shipments', {
+      const API_BASE = window.location.hostname === 'localhost' 
+        ? 'http://localhost:32772' 
+        : 'http://shipping-api:3030';
+      const response = await fetch(`${API_BASE}/shipments`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -181,10 +184,21 @@ function OrderStatus({ order, setOrder }: { order: any; setOrder: (order: any) =
     humanOptions: [],
     humanMessage: null
   });
+  
+  const [seenEvents, setSeenEvents] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     const startWorkflow = async () => {
-      const addLog = (message: string) => {
+      const addLog = (message: string, eventKey?: string) => {
+        // Prevent duplicate events
+        if (eventKey && seenEvents.has(eventKey)) {
+          return;
+        }
+        
+        if (eventKey) {
+          setSeenEvents(prev => new Set(prev).add(eventKey));
+        }
+        
         setWorkflowState(prev => ({
           ...prev,
           logs: [...prev.logs, `[${new Date().toLocaleTimeString()}] ${message}`]
@@ -210,10 +224,14 @@ function OrderStatus({ order, setOrder }: { order: any; setOrder: (order: any) =
         addLog(`✅ Created shipment: ${shipmentId}`);
 
         // Poll for status updates
+        const API_BASE = window.location.hostname === 'localhost' 
+          ? 'http://localhost:32772' 
+          : 'http://shipping-api:3030';
         const pollStatus = async () => {
-          const statusResponse = await fetch(`http://localhost:3030/shipments/${shipmentId}`);
+          const statusResponse = await fetch(`${API_BASE}/shipments/${shipmentId}`);
           const statusData = await statusResponse.json();
           const status = statusData.status;
+          const currentError = statusData.current_error;
 
           // Map status to step number
           const statusToStep: Record<string, number> = {
@@ -229,39 +247,58 @@ function OrderStatus({ order, setOrder }: { order: any; setOrder: (order: any) =
           };
 
           const step = statusToStep[status];
+          
+          // Handle cancelled state
           if (step === -1) {
+            addLog("🚫 Shipment cancelled", `cancelled-${shipmentId}`);
             setWorkflowState(prev => ({
               ...prev,
-              status: 'cancelled'
+              status: 'cancelled',
+              humanMessage: null,
+              humanOptions: []
             }));
             return false;
           }
 
-          if (step !== workflowState.currentStep) {
-            updateStep(step);
-            addLog(`✅ Status updated: ${status}`);
-
-            // Trigger next step based on current status
-            if (status === 'PAYMENT_RECEIVED') {
-              await fetch(`http://localhost:3030/shipments/${shipmentId}/allocate-warehouse`, {
-                method: 'POST'
-              });
-            } else if (status === 'PACKAGED') {
-              await fetch(`http://localhost:3030/shipments/${shipmentId}/start-transport`, {
-                method: 'POST'
-              });
-            } else if (status === 'TRANSPORT_STARTED') {
-              await fetch(`http://localhost:3030/shipments/${shipmentId}/update-customs`, {
-                method: 'POST'
-              });
-            } else if (status === 'CUSTOMS_CLEARANCE') {
-              await fetch(`http://localhost:3030/shipments/${shipmentId}/start-local-delivery`, {
-                method: 'POST'
-              });
-            }
+          // Handle delivered state
+          if (status === 'DELIVERED') {
+            addLog("📦 Shipment completed!", `delivered-${shipmentId}`);
+            setWorkflowState(prev => ({
+              ...prev,
+              status: 'completed',
+              humanMessage: null,
+              humanOptions: []
+            }));
+            return false;
           }
 
-          return step < 7;
+          // Update step only if changed (prevents duplicates)
+          if (step !== workflowState.currentStep) {
+            updateStep(step);
+            addLog(`✅ Status updated: ${status}`, `status-${status}-${shipmentId}`);
+          }
+
+          // Check for human-in-the-loop errors
+          if (currentError && currentError.resolution_options && currentError.resolution_options.length > 0) {
+            const errorKey = `error-${currentError.reason}-${shipmentId}`;
+            if (!seenEvents.has(errorKey)) {
+              addLog(`⚠️ ${currentError.details}`, errorKey);
+              setWorkflowState(prev => ({
+                ...prev,
+                humanMessage: currentError.details,
+                humanOptions: currentError.resolution_options
+              }));
+            }
+          } else if (workflowState.humanMessage && !currentError) {
+            // Error was resolved, clear UI
+            setWorkflowState(prev => ({
+              ...prev,
+              humanMessage: null,
+              humanOptions: []
+            }));
+          }
+
+          return step < 7 && status !== 'DELIVERED';
         };
 
         // Start polling
@@ -323,20 +360,39 @@ function OrderStatus({ order, setOrder }: { order: any; setOrder: (order: any) =
         "Send to tech support": "SEND_TO_TECH_SUPPORT",
         "Retry payment": "RETRY_PAYMENT",
         "Resume when ready": "RESUME_WHEN_READY",
+        "Resume when system is ready": "RESUME_WHEN_READY",
         "Cancel order": "CANCEL_ORDER",
-        // Order choices
+        // Order validation choices
         "Accept new price": "ACCEPT_NEW_PRICE",
         "Update order": "UPDATE_ORDER",
+        "Update order with available items": "UPDATE_ORDER",
         "Adjust quantity": "ADJUST_QUANTITY",
+        // Warehouse choices
+        "Allocate from different warehouse": "ALLOCATE_DIFFERENT",
+        "Cancel order and reorder from another supplier": "CANCEL_ORDER",
+        "Wait for stock to be replenished": "WAIT_FOR_STOCK",
         // Transport choices
-        "Wait for resolution": "WAIT_FOR_RESOLUTION",
+        "Notice customers and offer refunds": "NOTICE_CUSTOMERS_REFUND",
+        "Do nothing and wait out bad weather (pause workflow)": "WAIT_OUT_WEATHER",
+        "Reroute shipment from unaffected supplier (high cost)": "REROUTE_SHIPMENT",
+        "Wait for resolution": "WAIT_OUT_WEATHER",
         "Reroute shipment": "REROUTE_SHIPMENT",
-        "Expedite with premium service": "EXPEDITE_SERVICE",
+        "Expedite with premium service": "REROUTE_SHIPMENT",
         // Customs choices
         "Provide additional documentation": "PROVIDE_DOCUMENTATION",
+        "Pay expedited processing fee": "PAY_EXPEDITED_FEE",
         "Pay expedited fee": "PAY_EXPEDITED_FEE",
         "Accept delay": "ACCEPT_DELAY",
-        "Return shipment": "RETURN_SHIPMENT"
+        "Return shipment": "RETURN_SHIPMENT",
+        // Delivery choices
+        "Schedule new delivery time": "SCHEDULE_NEW_TIME",
+        "Leave at safe location": "LEAVE_SAFE_LOCATION",
+        "Return to depot for pickup": "RETURN_TO_DEPOT",
+        "Cancel delivery": "CANCEL_ORDER",
+        // Delay resolution choices
+        "Do nothing (small delay)": "DO_NOTHING",
+        "Inform customers": "INFORM_CUSTOMERS",
+        "Contact and rearrange logistics-hub timeslots": "REARRANGE_LOGISTICS"
       };
 
       const operatorChoice = choiceMap[choice];
@@ -344,8 +400,12 @@ function OrderStatus({ order, setOrder }: { order: any; setOrder: (order: any) =
         throw new Error(`Unknown choice: ${choice}`);
       }
 
+      const API_BASE = window.location.hostname === 'localhost' 
+        ? 'http://localhost:32772' 
+        : 'http://shipping-api:3030';
+        
       if (operatorChoice === "CANCEL_ORDER" || operatorChoice === "RETURN_SHIPMENT") {
-        await fetch(`http://localhost:3030/shipments/${workflowState.shipmentId}`, {
+        await fetch(`${API_BASE}/shipments/${workflowState.shipmentId}`, {
           method: 'DELETE'
         });
         addLog("🚫 Order cancelled by human operator");
@@ -359,7 +419,7 @@ function OrderStatus({ order, setOrder }: { order: any; setOrder: (order: any) =
       }
 
       // Send resolution to backend
-      await fetch(`http://localhost:3030/shipments/${workflowState.shipmentId}/handle-resolution`, {
+      await fetch(`${API_BASE}/shipments/${workflowState.shipmentId}/handle-resolution`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -367,14 +427,7 @@ function OrderStatus({ order, setOrder }: { order: any; setOrder: (order: any) =
         body: JSON.stringify({ choice: operatorChoice })
       });
 
-      // For transport-related choices, start transport if needed
-      if (workflowState.currentStep === 3) {
-        await fetch(`http://localhost:3030/shipments/${workflowState.shipmentId}/start-transport`, {
-          method: 'POST'
-        });
-      }
-
-      // Continue with workflow
+      // Workflow continues automatically after resolution
       addLog("✅ Resuming workflow");
       setWorkflowState(prev => ({
         ...prev,
@@ -456,7 +509,10 @@ function OrderStatus({ order, setOrder }: { order: any; setOrder: (order: any) =
               const prevOrder = order;
               setOrder(null);
               try {
-                const response = await fetch('http://localhost:3030/shipments', {
+                const API_BASE = window.location.hostname === 'localhost' 
+                  ? 'http://localhost:32772' 
+                  : 'http://shipping-api:3030';
+                const response = await fetch(`${API_BASE}/shipments`, {
                   method: 'POST',
                   headers: {
                     'Content-Type': 'application/json'
@@ -500,17 +556,26 @@ function OrderStatus({ order, setOrder }: { order: any; setOrder: (order: any) =
 
       <div className="mt-8 bg-black p-6 rounded-lg border border-gray-700 font-mono">
         <h3 className="font-bold mb-4 text-gray-300">Status Log:</h3>
-        <pre className="text-sm whitespace-pre-wrap text-gray-400 h-48 overflow-y-auto">
+        <div 
+          ref={(el) => {
+            if (el) {
+              el.scrollTop = el.scrollHeight;
+            }
+          }}
+          className="text-sm whitespace-pre-wrap text-gray-400 h-48 overflow-y-auto"
+        >
           {workflowState.logs.map((log, index) => (
             <div key={index} className={cn(
-              log.includes("❌") && "text-red-500",
-              log.includes("⚠️") && "text-yellow-500",
-              log.includes("✅") && "text-green-500"
+              "py-0.5",
+              log.includes("❌") && "text-red-400",
+              log.includes("⚠️") && "text-yellow-400",
+              log.includes("✅") && "text-green-400",
+              log.includes("📦 Shipment completed!") && "text-green-500 font-bold"
             )}>
               {log}
             </div>
           ))}
-        </pre>
+        </div>
       </div>
     </div>
   );
