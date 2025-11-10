@@ -81,32 +81,7 @@ function Header() {
         <h1 className="text-4xl font-bold text-purple-300">Mysteryboxes Inc.</h1>
         <p className="text-gray-400">Global Logistics Simulation (Powered by Temporal)</p>
       </div>
-      <WarehouseStatus />
     </header>
-  );
-}
-
-function WarehouseStatus() {
-  // Placeholder for fetching warehouse status
-  const warehouse = {
-    name: "Swedish Warehouse",
-    stock: 77,
-    capacity: 100,
-    demand: "NORMAL",
-  };
-
-  const stockPercentage = (warehouse.stock / warehouse.capacity) * 100;
-  const stockColor = stockPercentage > 50 ? "text-green-400" : stockPercentage > 20 ? "text-yellow-400" : "text-red-400";
-
-  return (
-    <div className="bg-gray-800 p-4 rounded-lg border border-gray-700">
-      <div className="flex items-center gap-3">
-        <img src="https://raw.githubusercontent.com/temporalio/temporal-artwork/8a52a938a89a3347a3637499194b3d9a4c62b14c/logos/temporal-logo-hexagon-white.svg" alt="Temporal Logo" className="w-6 h-6" />
-        <h3 className="font-bold text-lg">{warehouse.name}</h3>
-      </div>
-      <p className={cn("text-sm mt-2", stockColor)}>Current Stock: {warehouse.stock}/{warehouse.capacity}</p>
-      <p className={cn("text-sm", stockColor)}>Demand: {warehouse.demand}</p>
-    </div>
   );
 }
 
@@ -114,9 +89,7 @@ function ChooseMysteryBox({ setOrder }: { setOrder: (order: any) => void }) {
   const handleOrder = async (box: any) => {
     try {
       // Create shipment with scenario ID
-      const API_BASE = window.location.hostname === 'localhost' 
-        ? 'http://localhost:32772' 
-        : 'http://shipping-api:3030';
+      const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:32772';
       const response = await fetch(`${API_BASE}/shipments`, {
         method: 'POST',
         headers: {
@@ -224,9 +197,7 @@ function OrderStatus({ order, setOrder }: { order: any; setOrder: (order: any) =
         addLog(`✅ Created shipment: ${shipmentId}`);
 
         // Poll for status updates
-        const API_BASE = window.location.hostname === 'localhost' 
-          ? 'http://localhost:32772' 
-          : 'http://shipping-api:3030';
+        const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://shipping-api:3030';
         const pollStatus = async () => {
           const statusResponse = await fetch(`${API_BASE}/shipments/${shipmentId}`);
           const statusData = await statusResponse.json();
@@ -262,9 +233,14 @@ function OrderStatus({ order, setOrder }: { order: any; setOrder: (order: any) =
 
           // Handle delivered state
           if (status === 'DELIVERED') {
+            // Update to final step before marking as completed
+            if (step !== workflowState.currentStep) {
+              updateStep(step);
+            }
             addLog("📦 Shipment completed!", `delivered-${shipmentId}`);
             setWorkflowState(prev => ({
               ...prev,
+              currentStep: 7,
               status: 'completed',
               humanMessage: null,
               humanOptions: []
@@ -400,9 +376,7 @@ function OrderStatus({ order, setOrder }: { order: any; setOrder: (order: any) =
         throw new Error(`Unknown choice: ${choice}`);
       }
 
-      const API_BASE = window.location.hostname === 'localhost' 
-        ? 'http://localhost:32772' 
-        : 'http://shipping-api:3030';
+      const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://shipping-api:3030';
         
       if (operatorChoice === "CANCEL_ORDER" || operatorChoice === "RETURN_SHIPMENT") {
         await fetch(`${API_BASE}/shipments/${workflowState.shipmentId}`, {
@@ -509,9 +483,7 @@ function OrderStatus({ order, setOrder }: { order: any; setOrder: (order: any) =
               const prevOrder = order;
               setOrder(null);
               try {
-                const API_BASE = window.location.hostname === 'localhost' 
-                  ? 'http://localhost:32772' 
-                  : 'http://shipping-api:3030';
+                const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://shipping-api:3030';
                 const response = await fetch(`${API_BASE}/shipments`, {
                   method: 'POST',
                   headers: {

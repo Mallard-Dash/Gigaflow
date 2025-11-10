@@ -312,8 +312,8 @@ async def monitor_shipment_status(
     logger.info(f"🔍 Monitoring shipment {shipment_id} in state {state}")
     await asyncio.sleep(0.5)
 
-    # 20% chance of random delay
-    if random.random() < 0.2:
+    # 15% chance of random delay
+    if random.random() < 0.15:
         delay_reasons = list(DelayReason)
         delay_reason = random.choice(delay_reasons)
         delay_hours = random.randint(1, 48)  # 1 hour to 2 days
