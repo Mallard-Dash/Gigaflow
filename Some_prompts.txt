@@ -1,0 +1,78 @@
+
+Prompt 1: in the shipping api, i want to add more curl steps. I now have three curls but i want to begin firstly with the curl called "order recieved" (started by user), "payment recieved (can only be started if order is recieved), "werehouse allocation" (Here the worker will see to that the payment is OK. If payment= Not OK it will retry that step three times, and when it fails it will send a message to human-in-the-loop noticing them the payment failed. If the payment is OK= Proceed to next step), "Packaged at factory" (If order is OK and the werehouse contains enough stock then proceed. If the stock is not enough the human-in-the-loop gets a choice like: Allocate from different warehouse, cancel order and order from another supplier, wait for the stock to be enough. This will however have economic consequences depending on the choice.
+
+Then we have the "Transport started"-step which is only triggered if all the other steps are OK. Next step is "Transport"(The user gets an estimated delivery-date and if something is wrong or the workflow is past due, the human-in-the-loop gets a notification of this and again, different choices on how to address the issue.
+
+Next step is "custom clearance" (The human-in-the-loop gets an updated delivery date estimation, and if the worker is past due, it will trigger a message to the human-in-the-loop)
+
+Next step is the "local delivery". Here the human-in-the-loop gets an update on the delivery-date, and if the worker once again is past due, or something happens. It will notify the human-in-the-loop.
+
+The last step is "delivered" and that one is fine as it is.
+
+Outcome response:I need to update the test file to cover all the new workflow states and functionality. The changes needed include:
+
+1. Add new activities to the Worker
+2. Update ShipmentInput with required fields
+3. Test payment verification with retries
+4. Test warehouse allocation
+5. Test the complete shipping flow including customs and delivery
+6. Test human-in-the-loop notifications
+
+prompt 2: The start-page in the frontend contains a lot of scernarios now, but i would like to change them to all the proboble problems that can occur. For example if we choose a scernario that is named "failed payment", the workflow will try to make the payment max three-times at the payment-step. In this scernario there is a 80% probobility that the payment will fail after the third attempt and the human-in-the-loop then get's a couple of choices along with a message containing the problem and why the payment won't go through. Choose one random event why the payment fails: Network error, reciever error, sender error, insufficient funds, bank-server down, transaction error, reciever bank says no.
+
+The choices the human-in-the-loop gets, depends of the nature of the problem. If the payment fails due to insuficcient funds, the order is cancelled automatically, otherwise the peoblem is presented along with the choices: 1. Send issue to tech-support, 2. Try again, 3. resume workflow when it works, 4. Cancel order.
+
+By this point the order should continue without problem if the user chooses 1, 2, or 3. If 4, then the order should be cancelled.
+
+In next step, it's only happy path all the way to "delivered".
+
+Implement this scernario for starters.
+
+Outcome response: I need to modify the workflow to handle payment failures with more detailed scenarios and human-in-the-loop choices. I'll need to:
+
+1. Create a PaymentError model to represent different failure reasons
+2. Update the payment verification activity to simulate random failures
+3. Add human operator choices based on the failure type
+4. Implement the logic for handling different operator choices
+
+Let me start by updating the workflow file.
+
+Prompt3: Now imnplement all the other scernarios with simmilar corresponding problems. The following scernarios should be added: Order-error, Warehouse-insuficcient inventory, Transport obstacle scernario, Stuck in customs-scenario, Delayed-scenario.
+
+I want all the corresponding scenarios to have a simmilar error handling-tree as the failed-payment scenario. ALL scenarios should have a worker running with a ETA-date. If that ETA changes, the user should get a notification about this.
+
+Outcome response: I've added all the error scenarios and activities. Now I need to update the workflow implementation to handle these scenarios and add the corresponding signals. Let me continue updating the workflow file.
+
+
+The following text is the prompt i used to build the logic for the application: "Prompt 1: in the shipping api, i want to add more curl steps. I now have three curls but i want to begin firstly with the curl called "order recieved" (started by user), "payment recieved (can only be started if order is recieved), "werehouse allocation" (Here the worker will see to that the payment is OK. If payment= Not OK it will retry that step three times, and when it fails it will send a message to human-in-the-loop noticing them the payment failed. If the payment is OK= Proceed to next step), "Packaged at factory" (If order is OK and the werehouse contains enough stock then proceed. If the stock is not enough the human-in-the-loop gets a choice like: Allocate from different warehouse, cancel order and order from another supplier, wait for the stock to be enough. This will however have economic consequences depending on the choice.
+
+Then we have the "Transport started"-step which is only triggered if all the other steps are OK. Next step is "Transport"(The user gets an estimated delivery-date and if something is wrong or the workflow is past due, the human-in-the-loop gets a notification of this and again, different choices on how to address the issue.
+
+Next step is "custom clearance" (The human-in-the-loop gets an updated delivery date estimation, and if the worker is past due, it will trigger a message to the human-in-the-loop)
+
+Next step is the "local delivery". Here the human-in-the-loop gets an update on the delivery-date, and if the worker once again is past due, or something happens. It will notify the human-in-the-loop.
+
+The last step is "delivered" and that one is fine as it is.
+
+Outcome response:I need to update the test file to cover all the new workflow states and functionality. The changes needed include:
+
+1. Add new activities to the Worker
+2. Update ShipmentInput with required fields
+3. Test payment verification with retries
+4. Test warehouse allocation
+5. Test the complete shipping flow including customs and delivery
+6. Test human-in-the-loop notifications"
+
+Now I want to better the application. The biggest problem now is that i can't get is running, but I could do that last night. For the logic of the scenarios I want all the scenarios to have some kind of simulated failure with temporal workers, that is very important. Except the first scenario which only shows a "happy-path" workflow.
+
+In the scenarios i want a 100% chance of a failure corresponding to that specific scenario. The failed transaction scenario is a good example on how things should be, it is almost perfect, it just needs to fail every-time. Then the temporal-worker will give it 3 retries, and on each retry there is a 80% chance of failure (so it will try again up to 3 times), then the human-in-the-loop gets the message with the options.
+
+I want to have these multiple choices for all the scenarios (except happy-path). e.g in the weather-scenario we can presume that a ship can't leave the port in shanghai due to stormy weather, now how will we address this issue? The human-in-the-loop should immidietly get a notice about the delayed shipment and be presented with the options to either. 1. "Notice customers and offer a refund to those who want to refund, 2. Do nothing and wait out the bad weather(Now the worker in the workflow pauses and waits for next command. In the frontend i can press resume to continue the flow, simulating that i have waited a few days), 3. Reroute the shipment from another supplier that is not affected by the bad weather (this will dramatically increase the cost). 
+
+In ALL scenarios there is a random event that can happen at any time AFTER the main-event have taken place. There is an 50% chance of a small delay due to (anything). The user will be informed with a message about this immidietly and are given a few options to address this issue. The delay can vary from 1 hour up tp 2 days: 1. Do nothing (if the delay is small), 2. Inform the customers, 3. Contact and rearrange the logistic-timeslots at the logistics-hub.
+
+I all scenarios the workers in temporal should act like this: A worker picks up the scenario and surveys when the different steps are being executed. When the scenario-error is triggered, the worker should either give the user options OR if there is a small issue the worker could solve this by itself. When the scenario issue is resolved and the logistic-flow is up and running, the worker should acknowledge this and let the scenario continue. When the order is delivered, the worker should die with the finished workflow. 
+
+Regarding the random-event delay-function, there could be another worker in the background of each flow that is following the ETA of the package and is constantly updated. If this worker is past due: Then the user should be aware of this and presented with the options we discussed before. 
+
+In the frontend-terminal in each shipping flow scenario, the text flow should be from bottom to top instead, and not print double events. When the shipping flow is done and the worker is dead, that terminal will print  "Shipment completed!"

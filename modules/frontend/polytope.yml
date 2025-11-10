@@ -7,7 +7,7 @@ tools:
         type: [default, str, ./bin/run]
       - id: api-base-url
         info: Public base URL for the API, if one exists.
-        type: [default, str, http://localhost:32772]
+        type: [default, str, http://localhost:8080]
       - id: port
         info: The port on which the service will be exposed.
         type: [default, int, 51732]

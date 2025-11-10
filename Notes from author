@@ -1,0 +1,6 @@
+Hello! The date is now 9th Nov 2025 and the time is 23:36pm. The application is almost complete.
+Needs a few bugfixes in the complicated workflow to function properly with the frontend.
+In some scenarios, the workflow gets stuck or doesen't trigger the scenario.
+
+There is a 50% chance to trigger the random event in any scenario: ETA is changed.
+If >1h ETA: The agent autosolves the issue. otherwise the human should get notified by this.

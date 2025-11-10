@@ -1,0 +1,14 @@
+include:
+  - repo: gh:bluetext-io/bluetext
+  - modules/temporal
+  - modules/postgres
+  - modules/shipping-api
+  - modules/frontend
+tools:
+  default:
+    run:
+      - tool: "temporal"
+      - tool: "temporal-ui"
+      - tool: "postgres"
+      - tool: "shipping-api"
+      - tool: "frontend"

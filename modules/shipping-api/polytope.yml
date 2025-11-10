@@ -10,7 +10,7 @@ tools:
         type: [default, bool, true]
       - id: port
         info: The port the API will run on
-        type: [default, int, 3030]
+        type: [default, int, 8080]
       - id: restart-policy
         info: Restart policy for the container.
         type: [default, [enum, always, never, on-failure], always]

@@ -89,7 +89,7 @@ function ChooseMysteryBox({ setOrder }: { setOrder: (order: any) => void }) {
   const handleOrder = async (box: any) => {
     try {
       // Create shipment with scenario ID
-      const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:32772';
+      const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:32776';
       const response = await fetch(`${API_BASE}/shipments`, {
         method: 'POST',
         headers: {
@@ -159,33 +159,38 @@ function OrderStatus({ order, setOrder }: { order: any; setOrder: (order: any) =
   });
   
   const [seenEvents, setSeenEvents] = useState<Set<string>>(new Set());
+  const [lastStatus, setLastStatus] = useState<string>('');
 
   useEffect(() => {
+    let shouldContinuePolling = true;
+    const seenEventsRef = new Set<string>();
+
+    const addLog = (message: string, eventKey?: string) => {
+      // Prevent duplicate events using ref
+      if (eventKey && seenEventsRef.has(eventKey)) {
+        return;
+      }
+      
+      if (eventKey) {
+        seenEventsRef.add(eventKey);
+        setSeenEvents(prev => new Set(prev).add(eventKey));
+      }
+      
+      setWorkflowState(prev => ({
+        ...prev,
+        logs: [...prev.logs, `[${new Date().toLocaleTimeString()}] ${message}`]
+      }));
+    };
+
+    const updateStep = (step: number, eta?: string) => {
+      setWorkflowState(prev => ({
+        ...prev,
+        currentStep: step,
+        eta: eta || prev.eta
+      }));
+    };
+
     const startWorkflow = async () => {
-      const addLog = (message: string, eventKey?: string) => {
-        // Prevent duplicate events
-        if (eventKey && seenEvents.has(eventKey)) {
-          return;
-        }
-        
-        if (eventKey) {
-          setSeenEvents(prev => new Set(prev).add(eventKey));
-        }
-        
-        setWorkflowState(prev => ({
-          ...prev,
-          logs: [...prev.logs, `[${new Date().toLocaleTimeString()}] ${message}`]
-        }));
-      };
-
-      const updateStep = (step: number, eta?: string) => {
-        setWorkflowState(prev => ({
-          ...prev,
-          currentStep: step,
-          eta: eta || prev.eta
-        }));
-      };
-
       try {
         // Use existing shipment ID from order
         addLog("🚀 Starting shipment workflow...");
@@ -197,113 +202,106 @@ function OrderStatus({ order, setOrder }: { order: any; setOrder: (order: any) =
         addLog(`✅ Created shipment: ${shipmentId}`);
 
         // Poll for status updates
-        const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://shipping-api:3030';
+        const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080';
+        
         const pollStatus = async () => {
-          const statusResponse = await fetch(`${API_BASE}/shipments/${shipmentId}`);
-          const statusData = await statusResponse.json();
-          const status = statusData.status;
-          const currentError = statusData.current_error;
+          if (!shouldContinuePolling) return false;
 
-          // Map status to step number
-          const statusToStep: Record<string, number> = {
-            'ORDER_RECEIVED': 0,
-            'PAYMENT_RECEIVED': 1,
-            'WAREHOUSE_ALLOCATION': 2,
-            'PACKAGED': 3,
-            'TRANSPORT_STARTED': 4,
-            'CUSTOMS_CLEARANCE': 5,
-            'LOCAL_DELIVERY': 6,
-            'DELIVERED': 7,
-            'CANCELED': -1
-          };
+          try {
+            const statusResponse = await fetch(`${API_BASE}/shipments/${shipmentId}`);
+            const statusData = await statusResponse.json();
+            const status = statusData.status;
+            const currentError = statusData.current_error;
 
-          const step = statusToStep[status];
-          
-          // Handle cancelled state
-          if (step === -1) {
-            addLog("🚫 Shipment cancelled", `cancelled-${shipmentId}`);
-            setWorkflowState(prev => ({
-              ...prev,
-              status: 'cancelled',
-              humanMessage: null,
-              humanOptions: []
-            }));
-            return false;
-          }
+            // Map status to step number
+            const statusToStep: Record<string, number> = {
+              'ORDER_RECEIVED': 0,
+              'PAYMENT_RECEIVED': 1,
+              'WAREHOUSE_ALLOCATION': 2,
+              'PACKAGED': 3,
+              'TRANSPORT_STARTED': 4,
+              'CUSTOMS_CLEARANCE': 5,
+              'LOCAL_DELIVERY': 6,
+              'DELIVERED': 7,
+              'CANCELED': -1
+            };
 
-          // Handle delivered state
-          if (status === 'DELIVERED') {
-            // Update to final step before marking as completed
-            if (step !== workflowState.currentStep) {
+            const step = statusToStep[status];
+            
+            // Handle cancelled state
+            if (step === -1) {
+              const eventKey = `cancelled-${shipmentId}`;
+              if (!seenEventsRef.has(eventKey)) {
+                addLog("🚫 Shipment cancelled", eventKey);
+                setWorkflowState(prev => ({
+                  ...prev,
+                  status: 'cancelled',
+                  humanMessage: null,
+                  humanOptions: []
+                }));
+              }
+              return false;
+            }
+
+            // Handle delivered state
+            if (status === 'DELIVERED') {
+              const eventKey = `delivered-${shipmentId}`;
+              if (!seenEventsRef.has(eventKey)) {
+                updateStep(7);
+                addLog("📦 Shipment completed!", eventKey);
+                setWorkflowState(prev => ({
+                  ...prev,
+                  currentStep: 7,
+                  status: 'completed',
+                  humanMessage: null,
+                  humanOptions: []
+                }));
+              }
+              return false;
+            }
+
+            // Update step only if changed (prevents duplicates)
+            const statusKey = `status-${status}`;
+            if (status !== lastStatus && !seenEventsRef.has(statusKey)) {
+              setLastStatus(status);
               updateStep(step);
+              addLog(`✅ Status updated: ${status}`, statusKey);
             }
-            addLog("📦 Shipment completed!", `delivered-${shipmentId}`);
-            setWorkflowState(prev => ({
-              ...prev,
-              currentStep: 7,
-              status: 'completed',
-              humanMessage: null,
-              humanOptions: []
-            }));
-            return false;
-          }
 
-          // Update step only if changed (prevents duplicates)
-          if (step !== workflowState.currentStep) {
-            updateStep(step);
-            addLog(`✅ Status updated: ${status}`, `status-${status}-${shipmentId}`);
-          }
-
-          // Check for human-in-the-loop errors
-          if (currentError && currentError.resolution_options && currentError.resolution_options.length > 0) {
-            const errorKey = `error-${currentError.reason}-${shipmentId}`;
-            if (!seenEvents.has(errorKey)) {
-              addLog(`⚠️ ${currentError.details}`, errorKey);
-              setWorkflowState(prev => ({
-                ...prev,
-                humanMessage: currentError.details,
-                humanOptions: currentError.resolution_options
-              }));
+            // Check for human-in-the-loop errors - just update UI, don't stop polling
+            if (currentError && currentError.resolution_options && currentError.resolution_options.length > 0) {
+              const errorKey = `error-${currentError.reason}-${shipmentId}`;
+              if (!seenEventsRef.has(errorKey)) {
+                addLog(`⚠️ ${currentError.details}`, errorKey);
+                setWorkflowState(prev => ({
+                  ...prev,
+                  humanMessage: currentError.details,
+                  humanOptions: currentError.resolution_options
+                }));
+              }
+            } else if (workflowState.humanMessage) {
+              // Error was resolved on backend, clear UI
+              const resolvedKey = `resolved-${status}`;
+              if (!seenEventsRef.has(resolvedKey)) {
+                addLog("✅ Issue resolved, continuing workflow", resolvedKey);
+                setWorkflowState(prev => ({
+                  ...prev,
+                  humanMessage: null,
+                  humanOptions: []
+                }));
+              }
             }
-          } else if (workflowState.humanMessage && !currentError) {
-            // Error was resolved, clear UI
-            setWorkflowState(prev => ({
-              ...prev,
-              humanMessage: null,
-              humanOptions: []
-            }));
-          }
 
-          return step < 7 && status !== 'DELIVERED';
-        };
-
-        // Start polling
-        const poll = async () => {
-          while (await pollStatus()) {
-            await new Promise(resolve => setTimeout(resolve, 2000));
+            return step < 7 && status !== 'DELIVERED';
+          } catch (error) {
+            console.error('Polling error:', error);
+            return true; // Continue polling on error
           }
         };
 
-        poll();
-
-        // Simulate scenario-specific behavior
-        if (order.id === 'transport-delay') {
-          setTimeout(async () => {
-            addLog("⚠️ Severe weather affecting transport route");
-            const newEta = "2025-11-25";
-            addLog("📅 New estimated delivery: " + newEta);
-            setWorkflowState(prev => ({
-              ...prev,
-              eta: newEta,
-              humanMessage: "Transport delayed due to weather. Please choose an action:",
-              humanOptions: [
-                "Wait for resolution",
-                "Reroute shipment",
-                "Expedite with premium service",
-                "Cancel delivery"
-              ]
-            }));
-          }, 5000);
+        // Start polling loop - continues even during human intervention
+        while (await pollStatus()) {
+          await new Promise(resolve => setTimeout(resolve, 2000));
         }
 
       } catch (error) {
@@ -317,9 +315,13 @@ function OrderStatus({ order, setOrder }: { order: any; setOrder: (order: any) =
     };
 
     startWorkflow();
+
+    return () => {
+      shouldContinuePolling = false;
+    };
   }, [order.id]);
 
-  const handleHumanChoice = async (choice: string) => {
+  const handleHumanChoice = async (choice: string, isAiChoice: boolean = false) => {
     const addLog = (message: string) => {
       setWorkflowState(prev => ({
         ...prev,
@@ -327,7 +329,11 @@ function OrderStatus({ order, setOrder }: { order: any; setOrder: (order: any) =
       }));
     };
 
-    addLog(`👤 Human operator chose: ${choice}`);
+    if (isAiChoice) {
+      addLog(`🤖 AI auto-resolved: ${choice}`);
+    } else {
+      addLog(`👤 Human operator chose: ${choice}`);
+    }
 
     try {
       // Map frontend choices to backend enum values
@@ -458,18 +464,54 @@ function OrderStatus({ order, setOrder }: { order: any; setOrder: (order: any) =
         </div>
 
         {workflowState.humanMessage && (
-          <div className="mt-8 p-4 bg-yellow-900/50 rounded-lg border border-yellow-700">
-            <p className="text-yellow-300 mb-4">{workflowState.humanMessage}</p>
-            <div className="flex flex-wrap gap-2">
+          <div className="mt-8 p-6 bg-gradient-to-r from-yellow-900/60 to-orange-900/60 rounded-xl border-2 border-yellow-600 shadow-xl">
+            <div className="flex items-start gap-4 mb-6">
+              <div className="text-4xl">⚠️</div>
+              <div className="flex-1">
+                <h3 className="text-2xl font-bold text-yellow-200 mb-3">Operator Decision Required</h3>
+                <p className="text-lg text-yellow-100 leading-relaxed">{workflowState.humanMessage}</p>
+              </div>
+            </div>
+            
+            <div className="space-y-3 bg-black/30 p-5 rounded-lg">
+              <p className="text-sm text-yellow-200 font-semibold mb-3">Select an action:</p>
+              
+              {/* AI Auto-resolve option */}
+              <label className="flex items-center gap-3 p-3 rounded-lg bg-blue-900/40 border-2 border-blue-600 cursor-pointer hover:bg-blue-900/60 transition-all">
+                <input
+                  type="radio"
+                  name="resolution"
+                  value="ai-auto-resolve"
+                  className="w-5 h-5 text-blue-600 cursor-pointer"
+                  onChange={() => {
+                    // Choose first non-cancel option
+                    const choice = workflowState.humanOptions.find(opt => 
+                      !opt.toLowerCase().includes('cancel')
+                    ) || workflowState.humanOptions[0];
+                    handleHumanChoice(choice, true);
+                  }}
+                />
+                <div className="flex-1">
+                  <span className="text-blue-200 font-semibold text-base">🤖 Let AI handle this situation</span>
+                  <p className="text-blue-300 text-sm mt-1">Automatically selects the recommended action</p>
+                </div>
+              </label>
+
+              {/* Manual options */}
               {workflowState.humanOptions.map((option, index) => (
-                <Button
+                <label 
                   key={index}
-                  variant="outline"
-                  className="bg-yellow-600 text-white hover:bg-yellow-700"
-                  onClick={() => handleHumanChoice(option)}
+                  className="flex items-center gap-3 p-3 rounded-lg bg-yellow-900/40 border-2 border-yellow-700 cursor-pointer hover:bg-yellow-900/60 transition-all"
                 >
-                  {option}
-                </Button>
+                  <input
+                    type="radio"
+                    name="resolution"
+                    value={option}
+                    className="w-5 h-5 text-yellow-600 cursor-pointer"
+                    onChange={() => handleHumanChoice(option)}
+                  />
+                  <span className="text-yellow-100 font-medium text-base">{option}</span>
+                </label>
               ))}
             </div>
           </div>
