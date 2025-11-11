@@ -28,7 +28,7 @@ export const links: Route.LinksFunction = () => [
   },
   {
     rel: "stylesheet",
-    href: "https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&display=swap",
+    href: "https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap",
   },
 ];
 
@@ -40,27 +40,6 @@ export function Layout({ children }: { children: React.ReactNode }) {
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <Meta />
         <Links />
-        {/* Theme detection script - runs before React hydration */}
-        <script dangerouslySetInnerHTML={{
-          __html: `
-            (function() {
-              // Apply theme based on system preference
-              const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-              if (prefersDark) {
-                document.documentElement.classList.add('dark');
-              }
-
-              // Listen for theme changes
-              window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
-                if (e.matches) {
-                  document.documentElement.classList.add('dark');
-                } else {
-                  document.documentElement.classList.remove('dark');
-                }
-              });
-            })();
-          `
-        }} />
       </head>
       <body>
         {children}

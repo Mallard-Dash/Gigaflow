@@ -66,19 +66,28 @@ class HumanOperatorChoice(str, Enum):
     NOTICE_CUSTOMERS_REFUND = "NOTICE_CUSTOMERS_REFUND"
     WAIT_OUT_WEATHER = "WAIT_OUT_WEATHER"
     REROUTE_SHIPMENT = "REROUTE_SHIPMENT"
+    # Carrier choices
+    SWITCH_PREMIUM_CARRIER = "SWITCH_PREMIUM_CARRIER"
+    SWITCH_STANDARD_CARRIER = "SWITCH_STANDARD_CARRIER"
+    WAIT_BANKRUPTCY = "WAIT_BANKRUPTCY"
     # Customs choices
     PROVIDE_DOCUMENTATION = "PROVIDE_DOCUMENTATION"
     PAY_EXPEDITED_FEE = "PAY_EXPEDITED_FEE"
     ACCEPT_DELAY = "ACCEPT_DELAY"
     RETURN_SHIPMENT = "RETURN_SHIPMENT"
-    # Delivery choices
+    # Delivery/Lab choices
     SCHEDULE_NEW_TIME = "SCHEDULE_NEW_TIME"
     LEAVE_SAFE_LOCATION = "LEAVE_SAFE_LOCATION"
     RETURN_TO_DEPOT = "RETURN_TO_DEPOT"
+    AGREE_RECALL_ORDER_NEW = "AGREE_RECALL_ORDER_NEW"
+    IGNORE_RECALL_HIGH_RISK = "IGNORE_RECALL_HIGH_RISK"
     # Delay resolution choices
     DO_NOTHING = "DO_NOTHING"
     INFORM_CUSTOMERS = "INFORM_CUSTOMERS"
     REARRANGE_LOGISTICS = "REARRANGE_LOGISTICS"
+    # Snowstorm scenario choices
+    HAND_OVER_TO_HITL = "HAND_OVER_TO_HITL"
+    AI_MONITOR_AND_WAIT = "AI_MONITOR_AND_WAIT"
 
 
 class DelayReason(str, Enum):
@@ -263,13 +272,13 @@ async def check_customs_status(
         logger.warning("⚠️ Customs issue: Missing documentation")
         return False, ErrorDetails(
             reason="DOCUMENTATION_MISSING",
-            details="Required customs documentation missing - certificate of origin not attached",
+            details="Customs hold at border - Missing CE certification for electronic components",
             eta_impact=timedelta(days=delay_days),
             resolution_options=[
-                "Provide additional documentation",
-                "Pay expedited processing fee",
-                "Accept delay",
-                "Return shipment",
+                "Submit emergency CE certification (2-day expedited process)",
+                "Reroute through alternative customs point with lower requirements",
+                "Accept standard 4-day processing delay",
+                "Cancel shipment and source domestically",
             ],
         )
 
@@ -278,29 +287,88 @@ async def check_customs_status(
 
 
 @activity.defn
-async def check_delivery_status(
+async def check_logistics_conditions(
     shipment_id: str, order_details: dict
 ) -> tuple[bool, ErrorDetails | None]:
-    """Check delivery - 100% failure for delivery-delay scenario."""
-    logger.info(f"🚚 Checking delivery status for shipment {shipment_id}")
+    """Check logistics conditions between customs and delivery - snowstorm scenario."""
+    logger.info(f"🌨️ Checking logistics conditions for shipment {shipment_id}")
     await asyncio.sleep(1)
 
-    if order_details.get("simulate_delivery_delay", False):
-        delay_hours = random.randint(12, 48)
-        logger.warning("⚠️ Delivery issue: Recipient unavailable")
+    if order_details.get("simulate_snowstorm", False):
+        logger.warning("⚠️ Major snowstorm detected across Sweden - all logistics halted")
         return False, ErrorDetails(
-            reason="RECIPIENT_UNAVAILABLE",
-            details="Recipient not available at delivery address - multiple attempts failed",
-            eta_impact=timedelta(hours=delay_hours),
+            reason="SNOWSTORM_SWEDEN",
+            details="Major snowstorm has hit Sweden. All major highways closed. Logistics operations halted until weather clears.",
+            eta_impact=timedelta(days=2),
             resolution_options=[
-                "Schedule new delivery time",
-                "Leave at safe location",
-                "Return to depot for pickup",
-                "Cancel delivery",
+                "Hand over to human operator for manual handling",
+                "AI monitors weather and automatically resumes when clear",
             ],
         )
 
-    logger.info("✅ Delivery confirmed - recipient available")
+    logger.info("✅ Logistics conditions normal")
+    return True, None
+
+
+@activity.defn
+async def monitor_weather_and_notify(shipment_id: str) -> None:
+    """Monitor weather conditions and send notifications - for snowstorm scenario."""
+    logger.info(f"📧 Contacting customers...")
+    await asyncio.sleep(1)
+    
+    logger.info(f"📞 Contacting logistics-hub...")
+    await asyncio.sleep(1)
+    
+    logger.info(f"🌦️ Monitoring weather...")
+    await asyncio.sleep(1)
+
+
+@activity.defn
+async def check_delivery_status(
+    shipment_id: str, order_details: dict
+) -> tuple[bool, ErrorDetails | None]:
+    """Check delivery - 100% failure for delivery-delay scenario (Lab Inspection Failure)."""
+    logger.info(f"🔬 Checking lab inspection status for shipment {shipment_id}")
+    await asyncio.sleep(1)
+
+    if order_details.get("simulate_delivery_delay", False):
+        logger.warning("⚠️ Lab Inspection Failure: Zinc-coated screw batch failed quality test")
+        return False, ErrorDetails(
+            reason="LAB_INSPECTION_FAILURE",
+            details="A batch of Zinc-coated screws (TQ3344901) didn't pass the lab-test inspection and the whole batch must be recalled.",
+            eta_impact=None,
+            resolution_options=[
+                "Agree to recall and order new batch from local supplier",
+                "Receive the batch and ignore the recall (Catastrophic consequences could happen. Your company could be held accountable for this, high risk)",
+            ],
+        )
+
+    logger.info("✅ Lab inspection passed - all quality standards met")
+    return True, None
+
+
+@activity.defn
+async def check_carrier_status(
+    shipment_id: str, order_details: dict
+) -> tuple[bool, ErrorDetails | None]:
+    """Check carrier status - 100% failure for carrier-bankruptcy scenario."""
+    logger.info(f"🚢 Checking carrier status for shipment {shipment_id}")
+    await asyncio.sleep(1)
+
+    if order_details.get("simulate_carrier_bankruptcy", False):
+        logger.warning("⚠️ Carrier Bankruptcy: Shipping carrier has filed for bankruptcy")
+        return False, ErrorDetails(
+            reason="CARRIER_BANKRUPTCY",
+            details="The assigned shipping carrier has filed for Chapter 11 bankruptcy. All shipments are frozen pending resolution.",
+            eta_impact=timedelta(days=3),
+            resolution_options=[
+                "Switch to premium carrier (FedEx Express)",
+                "Switch to standard alternative (UPS Ground)",
+                "Wait for bankruptcy proceedings (high risk of total loss)",
+            ],
+        )
+
+    logger.info("✅ Carrier operational and ready")
     return True, None
 
 
@@ -308,36 +376,11 @@ async def check_delivery_status(
 async def monitor_shipment_status(
     shipment_id: str, state: ShipmentState
 ) -> tuple[bool, ErrorDetails | None]:
-    """Monitor for random delays - 20% chance after main issue resolved."""
+    """Monitor for random delays - DISABLED for demo."""
     logger.info(f"🔍 Monitoring shipment {shipment_id} in state {state}")
     await asyncio.sleep(0.5)
-
-    # 15% chance of random delay
-    if random.random() < 0.15:
-        delay_reasons = list(DelayReason)
-        delay_reason = random.choice(delay_reasons)
-        delay_hours = random.randint(1, 48)  # 1 hour to 2 days
-
-        delay_details_map = {
-            DelayReason.LOGISTICS_DELAY: f"Unexpected {delay_hours}h delay at logistics hub",
-            DelayReason.WEATHER_IMPACT: f"Weather conditions causing {delay_hours}h delay",
-            DelayReason.TRAFFIC_CONGESTION: f"Heavy traffic causing {delay_hours}h delay",
-            DelayReason.RESOURCE_SHORTAGE: f"Resource constraints causing {delay_hours}h delay",
-            DelayReason.TECHNICAL_ISSUES: f"Technical issues causing {delay_hours}h delay",
-        }
-
-        logger.warning(f"⚠️ Random delay detected: {delay_details_map[delay_reason]}")
-        return False, ErrorDetails(
-            reason=delay_reason.value,
-            details=delay_details_map[delay_reason],
-            eta_impact=timedelta(hours=delay_hours),
-            resolution_options=[
-                "Do nothing (small delay)",
-                "Inform customers",
-                "Contact and rearrange logistics-hub timeslots",
-            ],
-        )
-
+    
+    # Random delays disabled for demo
     logger.info("✅ No delays detected")
     return True, None
 
@@ -402,6 +445,7 @@ class ShipmentWorkflow:
         self._transport_resolution = asyncio.Event()
         self._customs_resolution = asyncio.Event()
         self._delivery_resolution = asyncio.Event()
+        self._snowstorm_resolution = asyncio.Event()
 
     @workflow.run
     async def run(self, input: ShipmentInput) -> ShipmentResponse:
@@ -667,6 +711,48 @@ class ShipmentWorkflow:
 
         await self._check_for_random_delays(input.shipment_id)
 
+        # Step 5.5: Check logistics conditions (snowstorm scenario)
+        ok, error_details = await workflow.execute_activity(
+            check_logistics_conditions,
+            args=[input.shipment_id, input.order_details],
+            start_to_close_timeout=timedelta(seconds=30),
+        )
+
+        if not ok:
+            self._current_error = error_details
+            self._delivery_update = await workflow.execute_activity(
+                update_delivery_estimate,
+                args=[input.shipment_id, self._state, error_details],
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+            await workflow.execute_activity(
+                notify_human_operator,
+                args=[
+                    input.shipment_id,
+                    f"⚠️ Logistics issue: {error_details.details}\n"
+                    f"⏰ ETA Impact: +{error_details.eta_impact.days} days\n"
+                    f"📋 Available options:\n"
+                    + "\n".join(f"  {i+1}. {opt}" for i, opt in enumerate(error_details.resolution_options)),
+                    True,
+                ],
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+            
+            # Create snowstorm resolution event
+            snowstorm_resolution = asyncio.Event()
+            self._snowstorm_resolution = snowstorm_resolution
+            await snowstorm_resolution.wait()
+            
+            if self._state == ShipmentState.CANCELED:
+                logger.info(f"🚫 Workflow cancelled")
+                return ShipmentResponse(shipment_id=input.shipment_id, state=self._state)
+        else:
+            self._delivery_update = await workflow.execute_activity(
+                update_delivery_estimate,
+                args=[input.shipment_id, self._state],
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+
         # Step 6: Local delivery
         self._state = ShipmentState.LOCAL_DELIVERY
         await workflow.execute_activity(
@@ -688,12 +774,17 @@ class ShipmentWorkflow:
                 args=[input.shipment_id, self._state, error_details],
                 start_to_close_timeout=timedelta(seconds=10),
             )
+            eta_message = ""
+            if error_details.eta_impact:
+                eta_hours = error_details.eta_impact.total_seconds() // 3600
+                eta_message = f"⏰ ETA Impact: +{eta_hours:.0f} hours\n"
+            
             await workflow.execute_activity(
                 notify_human_operator,
                 args=[
                     input.shipment_id,
                     f"⚠️ Delivery issue: {error_details.details}\n"
-                    f"⏰ ETA Impact: +{error_details.eta_impact.total_seconds() // 3600:.0f} hours\n"
+                    f"{eta_message}"
                     f"📋 Available options:\n"
                     + "\n".join(f"  {i+1}. {opt}" for i, opt in enumerate(error_details.resolution_options)),
                     True,
@@ -1126,6 +1217,22 @@ class ShipmentWorkflow:
             self._current_error = None
             self._delivery_resolution.set()
             self._exit.set()
+        elif choice == HumanOperatorChoice.AGREE_RECALL_ORDER_NEW:
+            await workflow.execute_activity(
+                notify_human_operator,
+                args=[workflow_id, "✅ Batch recalled. New batch ordered from local supplier.", False],
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+            self._current_error = None
+            self._delivery_resolution.set()
+        elif choice == HumanOperatorChoice.IGNORE_RECALL_HIGH_RISK:
+            await workflow.execute_activity(
+                notify_human_operator,
+                args=[workflow_id, "⚠️ Recall ignored. Shipment proceeding with non-compliant batch (HIGH RISK).", False],
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+            self._current_error = None
+            self._delivery_resolution.set()
         else:
             await workflow.execute_activity(
                 notify_human_operator,
@@ -1163,6 +1270,61 @@ class ShipmentWorkflow:
             self._state = ShipmentState.PAYMENT_RECEIVED
             self._current_error = None
             self._payment_resolution.set()
+    
+    @workflow.signal
+    async def handle_snowstorm_resolution(self, choice: HumanOperatorChoice) -> None:
+        """Handle snowstorm scenario resolution."""
+        workflow_id = workflow.info().workflow_id
+        
+        if choice == HumanOperatorChoice.HAND_OVER_TO_HITL:
+            # Option A: Hand over to human operator - workflow ends
+            await workflow.execute_activity(
+                notify_human_operator,
+                args=[workflow_id, "👤 Handed over to human operator for manual handling.", False],
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+            self._state = ShipmentState.CANCELED
+            self._current_error = None
+            if hasattr(self, '_snowstorm_resolution'):
+                self._snowstorm_resolution.set()
+            self._exit.set()
+        elif choice == HumanOperatorChoice.AI_MONITOR_AND_WAIT:
+            # Option B: AI monitors and waits
+            await workflow.execute_activity(
+                monitor_weather_and_notify,
+                args=[workflow_id],
+                start_to_close_timeout=timedelta(seconds=30),
+            )
+            
+            # Wait for 10 seconds (simulating weather clearing)
+            await asyncio.sleep(10)
+            
+            # Weather cleared - resume workflow
+            await workflow.execute_activity(
+                notify_human_operator,
+                args=[workflow_id, "🌤️ Weather-conditions cleared, workflow resumed, updating customers with new ETA, updating logistics hub with new ETA.", False],
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+            
+            await asyncio.sleep(2)
+            
+            await workflow.execute_activity(
+                notify_human_operator,
+                args=[workflow_id, "📦 Order delivered!", False],
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+            
+            # Mark as delivered
+            self._state = ShipmentState.DELIVERED
+            await workflow.execute_activity(
+                update_shipment_state,
+                args=[workflow_id, self._state],
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+            
+            self._current_error = None
+            if hasattr(self, '_snowstorm_resolution'):
+                self._snowstorm_resolution.set()
     
     @workflow.signal
     async def handle_delay_resolution(self, choice: HumanOperatorChoice) -> None:

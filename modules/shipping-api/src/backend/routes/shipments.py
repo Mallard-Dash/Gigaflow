@@ -36,7 +36,7 @@ async def create_shipment(request: CreateShipmentRequest):
     order_details = {
         "items": ["mystery-box"],
         "quantity": 1,
-        "simulate_validation_failure": scenario_id == "price-mismatch",
+        "simulate_snowstorm": scenario_id == "price-mismatch",
         "simulate_stock_issue": scenario_id == "warehouse-stock",
         "simulate_transport_delay": scenario_id == "transport-delay",
         "simulate_customs_issue": scenario_id == "customs-issue",
@@ -181,8 +181,11 @@ async def handle_resolution(shipment_id: str, request: HandleResolutionRequest):
         handle = client.get_workflow_handle(shipment_id)
         status = await handle.query(ShipmentWorkflow.get_status)
         
+        # Check for snowstorm-specific choices (can happen when in CUSTOMS_CLEARANCE state)
+        if choice in [HumanOperatorChoice.HAND_OVER_TO_HITL, HumanOperatorChoice.AI_MONITOR_AND_WAIT]:
+            await handle.signal(ShipmentWorkflow.handle_snowstorm_resolution, choice)
         # Check if this is a delay-specific resolution (can happen in any state)
-        if choice in [HumanOperatorChoice.DO_NOTHING, HumanOperatorChoice.INFORM_CUSTOMERS, HumanOperatorChoice.REARRANGE_LOGISTICS]:
+        elif choice in [HumanOperatorChoice.DO_NOTHING, HumanOperatorChoice.INFORM_CUSTOMERS, HumanOperatorChoice.REARRANGE_LOGISTICS]:
             await handle.signal(ShipmentWorkflow.handle_delay_resolution, choice)
         # Route to appropriate resolution handler based on current state
         elif status == ShipmentState.ORDER_RECEIVED:
@@ -196,6 +199,7 @@ async def handle_resolution(shipment_id: str, request: HandleResolutionRequest):
         elif status == ShipmentState.CUSTOMS_CLEARANCE:
             await handle.signal(ShipmentWorkflow.handle_customs_resolution, choice)
         elif status == ShipmentState.LOCAL_DELIVERY:
+            # Lab choices and delivery choices both handled by delivery resolution
             await handle.signal(ShipmentWorkflow.handle_delivery_resolution, choice)
         else:
             raise HTTPException(status_code=400, detail=f"Cannot handle resolution in state {status}")

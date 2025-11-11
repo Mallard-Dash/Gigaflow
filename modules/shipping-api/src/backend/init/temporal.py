@@ -15,6 +15,8 @@ from ..workflows.shipment import (
     validate_order,
     check_transport_status,
     check_customs_status,
+    check_logistics_conditions,
+    monitor_weather_and_notify,
     check_delivery_status,
     update_delivery_estimate,
     monitor_shipment_status
@@ -40,6 +42,8 @@ async def init_temporal(app: FastAPI) -> None:
         validate_order,
         check_transport_status,
         check_customs_status,
+        check_logistics_conditions,
+        monitor_weather_and_notify,
         check_delivery_status,
         update_delivery_estimate,
         monitor_shipment_status
